@@ -19,7 +19,7 @@ setup(
     description="A package for causal forecasting with what-if scenario analysis",
     long_description="A package for causal forecasting with what-if scenario analysis",
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/causal_forecast",
+    url="https://github.com/thom1178/CausalForecasting.git",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
