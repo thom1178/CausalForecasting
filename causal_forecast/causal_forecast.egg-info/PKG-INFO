@@ -1,0 +1,29 @@
+Metadata-Version: 2.2
+Name: causal_forecast
+Version: 0.1.0
+Summary: A package for causal forecasting with what-if scenario analysis
+Home-page: https://github.com/yourusername/causal_forecast
+Author: Jamel Thomas
+Author-email: contact@jamelt.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+Requires-Dist: networkx>=2.5
+Requires-Dist: pandas>=1.0.0
+Requires-Dist: numpy>=1.19.0
+Requires-Dist: scikit-learn>=0.24.0
+Requires-Dist: matplotlib>=3.3.0
+Requires-Dist: seaborn>=0.11.0
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+A package for causal forecasting with what-if scenario analysis
