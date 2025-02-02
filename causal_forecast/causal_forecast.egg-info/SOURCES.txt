@@ -1,4 +1,3 @@
-README.md
 setup.py
 causal_forecast.egg-info/PKG-INFO
 causal_forecast.egg-info/SOURCES.txt

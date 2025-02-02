@@ -2,7 +2,7 @@ Metadata-Version: 2.2
 Name: causal_forecast
 Version: 0.1.0
 Summary: A package for causal forecasting with what-if scenario analysis
-Home-page: https://github.com/yourusername/causal_forecast
+Home-page: https://github.com/thom1178/CausalForecasting.git
 Author: Jamel Thomas
 Author-email: contact@jamelt.com
 Classifier: Programming Language :: Python :: 3
@@ -16,6 +16,7 @@ Requires-Dist: numpy>=1.19.0
 Requires-Dist: scikit-learn>=0.24.0
 Requires-Dist: matplotlib>=3.3.0
 Requires-Dist: seaborn>=0.11.0
+Requires-Dist: statsmodels>=0.12.0
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier

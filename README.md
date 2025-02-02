@@ -27,6 +27,16 @@ import networkx as nx
 import pandas as pd
 from causal_forecast import CausalForecaster
 
+dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='D')
+data = pd.DataFrame({
+    'timestamp': dates,
+    'temperature': temperature,
+    'humidity': humidity,
+    'rain': rain,
+    'crop_yield': crop_yield
+})
+
+
 # Create causal graph
 G = nx.DiGraph()
 G.add_edges_from([
