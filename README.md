@@ -2,22 +2,19 @@
 
 A Python package for causal forecasting that combines structural causal models with time series analysis. This package allows you to:
 - Build and analyze causal relationships in time series data
-- Make forecasts that respect causal structure
-- Run counterfactual scenarios for what-if analysis
-- Visualize temporal patterns and causal effects
+- Automatically detect continuous, binary, multiclass, and ordinal variables
+- Make forecasts that respect causal structure with nonlinear RandomForest models
+- Run counterfactual scenarios (scalar or per-horizon interventions)
+- Backtest with walk-forward expanding windows (no data leakage)
+- Evaluate fit quality with type-aware metrics
 
 ## Installation
-
-### From PyPI (Coming Soon)
-```bash
-pip install causal-forecast
-```
 
 ### From Source
 ```bash
 git clone https://github.com/thom1178/CausalForecasting.git
-cd causal_forecast
-pip install -e .
+cd CausalForecasting
+pip install -e causal_forecast
 ```
 
 ## Quick Start
@@ -25,83 +22,122 @@ pip install -e .
 ```python
 import networkx as nx
 import pandas as pd
-from causal_forecast import CausalForecaster
+import numpy as np
+from causal_forecast import CausalForecaster, detect_variable_types
 
 dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='D')
 data = pd.DataFrame({
     'timestamp': dates,
-    'temperature': temperature,
-    'humidity': humidity,
-    'rain': rain,
-    'crop_yield': crop_yield
+    'temperature': np.random.normal(25, 5, len(dates)),
+    'humidity': np.random.normal(60, 3, len(dates)),
+    'rain': np.random.binomial(1, 0.3, len(dates)),
+    'crop_yield': np.random.normal(90, 10, len(dates)),
 })
 
-
-# Create causal graph
 G = nx.DiGraph()
 G.add_edges_from([
     ('temperature', 'humidity'),
     ('temperature', 'rain'),
     ('humidity', 'crop_yield'),
-    ('rain', 'crop_yield')
+    ('rain', 'crop_yield'),
 ])
 
-# Initialize forecaster
+# Auto-detect variable types
+print(detect_variable_types(data, G, 'timestamp'))
+
 forecaster = CausalForecaster(
-    data=your_data,
+    data=data,
     graph=G,
     target='crop_yield',
     time_column='timestamp',
     forecast_horizon=30,
-    lookback_periods=7
+    lookback_periods=7,
 )
 
-# Train models
 forecaster.fit()
-
-# Make predictions
 future_predictions = forecaster.predict(steps=30)
 
-# Run counterfactual analysis
+# Per-horizon counterfactual (list length must equal horizon)
 counterfactual = forecaster.run_counterfactual({
-    'temperature': 35  # What if temperature is very high?
+    'temperature': list(np.linspace(30, 40, 30))
 })
+
+# Type-aware evaluation
+metrics = forecaster.evaluate(holdout_steps=30)
+print(metrics)
+
+# Walk-forward backtest (no leakage)
+backtest_results = forecaster.backtest(horizon=10, min_train_size=60, step_size=10)
+summary = forecaster.summarize_backtest(backtest_results)
+print(summary)
 ```
 
 ## Features
 
-### Time Series Forecasting
-- Automatic feature engineering for temporal data
-- Handles multiple time-dependent variables
-- Configurable forecast horizon and lookback periods
+### Automatic Variable Type Detection
+- **continuous**: numeric variables with many unique values
+- **binary**: two-class flags (0/1, yes/no)
+- **multiclass**: categorical strings or low-cardinality integers
+- **ordinal**: ordered pandas `CategoricalDtype`
 
-### Causal Analysis
-- Supports complex causal graphs (DAGs)
-- Respects causal relationships in predictions
-- Enables counterfactual scenario analysis
+Override detection with `type_overrides={'rain': 'binary'}`.
+
+### Type-Aware Models
+| Type | Model | Metrics |
+|------|-------|---------|
+| continuous | RandomForestRegressor | MAE, RMSE, MAPE |
+| binary | RandomForestClassifier | accuracy, F1, Brier score |
+| multiclass | RandomForestClassifier | accuracy, macro-F1, log loss |
+| ordinal | RandomForestClassifier | accuracy, ordinal MAE |
+
+### Walk-Forward Backtest
+`backtest()` uses an expanding training window. Each fold retrains only on data strictly before the test window. Use `n_jobs > 1` for parallel folds.
+
+### Counterfactuals
+- Scalar: `{'temperature': 35}` applies to all steps
+- Per-horizon: `{'temperature': [35, 36, 37, ...]}` list length must equal `steps`
 
 ### Visualization
 ```python
 from causal_forecast import (
-    plot_causal_graph,
     plot_time_series,
     plot_forecast_comparison,
     plot_seasonal_decomposition,
-    plot_counterfactual_timeseries
+    plot_counterfactual_timeseries,
+    plot_residuals,
+    plot_metrics_summary,
 )
 
-# Plot time series data
 plot_time_series(data, 'timestamp', ['temperature', 'crop_yield'])
-
-# Compare forecasts
 plot_forecast_comparison(actual_data, predictions, 'timestamp', 'crop_yield')
-
-# Analyze seasonality
-plot_seasonal_decomposition(data, 'timestamp', 'temperature')
-
-# Visualize counterfactuals
-plot_counterfactual_timeseries(predictions, counterfactual, 'timestamp')
+plot_metrics_summary(metrics, metric='rmse')
+plot_residuals(holdout_data, predictions, 'timestamp', 'crop_yield')
 ```
+
+## API Reference
+
+### CausalForecaster
+```python
+CausalForecaster(
+    data: pd.DataFrame,
+    graph: nx.DiGraph,
+    target: str,
+    time_column: str,
+    forecast_horizon: int = 1,
+    lookback_periods: int = 3,
+    type_overrides: dict = None,
+    use_one_hot_parents: bool = True,
+)
+```
+
+### Key Methods
+- `fit(verbose=True)`: Train type-aware models per node
+- `predict(steps, counterfactuals)`: Multi-step forecast
+- `run_counterfactual(interventions, steps)`: What-if scenarios
+- `evaluate(holdout_steps, in_sample=False)`: Type-aware metrics
+- `backtest(horizon, min_train_size, step_size, n_jobs=1)`: Walk-forward backtest
+- `summarize_backtest(backtest_df)`: Aggregate backtest results
+- `detect_variable_types(data, graph, time_column)`: Standalone type detection
 
 ## Requirements
 - Python ≥ 3.7
@@ -112,41 +148,7 @@ plot_counterfactual_timeseries(predictions, counterfactual, 'timestamp')
 - matplotlib ≥ 3.3.0
 - seaborn ≥ 0.11.0
 - statsmodels ≥ 0.12.0
-
-## Documentation
-
-### CausalForecaster Class
-The main class for performing causal forecasting:
-
-```python
-CausalForecaster(
-    data: pd.DataFrame,          # Input data
-    graph: nx.DiGraph,          # Causal graph structure
-    target: str,                # Target variable
-    time_column: str,           # Time column name
-    forecast_horizon: int = 1,   # Steps to forecast
-    lookback_periods: int = 3    # Historical periods to use
-)
-```
-
-### Key Methods
-- `fit()`: Train the forecasting models
-- `predict(steps: int = None)`: Make future predictions
-- `run_counterfactual(interventions: dict)`: Run what-if scenarios
-
-## Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
+- joblib ≥ 1.0.0
 
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Citation
-If you use this package in your research, please cite:
-```bibtex
-@software{causal_forecast2024,
-  author = {Thomas, Jamel},
-  title = {Causal Forecast: A Python Package for Causal Time Series Analysis},
-  year = {2024},
-  url = {https://github.com/yourusername/causal_forecast}
-}
-```
+MIT License

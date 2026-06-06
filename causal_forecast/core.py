@@ -2,16 +2,35 @@ import networkx as nx
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Union
-from sklearn.ensemble import RandomForestRegressor
-from datetime import datetime, timedelta
-from .utils import validate_graph_data, train_node_model
-from .metrics import evaluate_forecast, evaluate_by_horizon
+from datetime import datetime
+
+from .typing import VariableType, detect_variable_types
+from .utils import (
+    FittedNodeModel,
+    infer_time_delta,
+    train_node_model,
+    validate_graph_data,
+    build_label_encoder,
+    decode_values,
+    expand_categorical_lag_features,
+    predict_node_value,
+    value_for_lag_feature,
+)
+from .metrics import (
+    evaluate_by_horizon,
+    evaluate_forecast_typed,
+    summarize_backtest,
+)
+
+CounterfactualValue = Union[float, int, str, List[Union[float, int, str]]]
+CounterfactualSpec = Optional[Dict[str, CounterfactualValue]]
+
 
 class CausalForecaster:
     """
     A causal forecasting class that combines structural causal models with time series forecasting.
     """
-    
+
     def __init__(
         self,
         data: pd.DataFrame,
@@ -19,11 +38,14 @@ class CausalForecaster:
         target: str,
         time_column: str,
         forecast_horizon: int = 1,
-        lookback_periods: int = 3
+        lookback_periods: int = 3,
+        variable_types: Optional[Dict[str, VariableType]] = None,
+        type_overrides: Optional[Dict[str, VariableType]] = None,
+        use_one_hot_parents: bool = True,
     ):
         """
         Initialize the CausalForecaster.
-        
+
         Args:
             data: Input DataFrame containing all variables
             graph: NetworkX DiGraph representing causal relationships
@@ -31,6 +53,9 @@ class CausalForecaster:
             time_column: Name of the time column
             forecast_horizon: Number of periods to forecast ahead
             lookback_periods: Number of historical periods to use for prediction
+            variable_types: Explicit variable types per node (skips auto-detection)
+            type_overrides: Overrides applied on top of auto-detection
+            use_one_hot_parents: One-hot encode multiclass/ordinal parent lags (Phase 2)
         """
         self.data = data.copy()
         self.graph = graph.copy()
@@ -38,141 +63,238 @@ class CausalForecaster:
         self.time_column = time_column
         self.forecast_horizon = forecast_horizon
         self.lookback_periods = lookback_periods
-        
-        # Validate inputs
+        self.use_one_hot_parents = use_one_hot_parents
+
         validate_graph_data(self.data, self.graph, self.target)
-        
-        # Sort data by time
-        self.data = self.data.sort_values(time_column)
-        
-        # Initialize models dictionary
-        self.models: Dict[str, RandomForestRegressor] = {}
-        
-        # Get topological order of nodes
+        self.data = self.data.sort_values(time_column).reset_index(drop=True)
+
+        if variable_types is not None:
+            self.variable_types = variable_types.copy()
+        else:
+            self.variable_types = detect_variable_types(
+                self.data,
+                self.graph,
+                self.time_column,
+                overrides=type_overrides,
+            )
+
+        self.models: Dict[str, FittedNodeModel] = {}
+        self.label_encoders: Dict[str, object] = {}
+        self.one_hot_encoders: Dict[str, object] = {}
+        self.one_hot_feature_names: Dict[str, List[str]] = {}
+        self.time_delta = infer_time_delta(self.data[self.time_column])
         self.node_order = list(nx.topological_sort(self.graph))
-        
+
     def _create_time_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create time-based features from the time column."""
         df = df.copy()
-        df['year'] = pd.to_datetime(df[self.time_column]).dt.year
-        df['month'] = pd.to_datetime(df[self.time_column]).dt.month
-        df['day'] = pd.to_datetime(df[self.time_column]).dt.day
-        df['dayofweek'] = pd.to_datetime(df[self.time_column]).dt.dayofweek
+        dt = pd.to_datetime(df[self.time_column])
+        df["year"] = dt.dt.year
+        df["month"] = dt.dt.month
+        df["day"] = dt.dt.day
+        df["dayofweek"] = dt.dt.dayofweek
         return df
-    
+
     def _prepare_time_series_data(self, node: str, return_dates: bool = False) -> tuple:
         """Prepare time series data with lagged features."""
         df = self._create_time_features(self.data)
-        
-        # Create lagged features for each parent node
         parents = list(self.graph.predecessors(node))
-        features = []
-        
-        # Add time features
-        time_features = ['year', 'month', 'day', 'dayofweek']
+        features: List[str] = []
+
+        time_features = ["year", "month", "day", "dayofweek"]
         features.extend(time_features)
-        
-        # Add lagged features for parents and the node itself
+
         all_vars = parents + ([node] if node not in parents else [])
         for var in all_vars:
-            for lag in range(1, self.lookback_periods + 1):
-                df[f'{var}_lag_{lag}'] = df[var].shift(lag)
-                features.append(f'{var}_lag_{lag}')
-        
-        # Drop rows with NaN values from lagging
-        df = df.dropna()
-        
+            var_type = self.variable_types[var]
+            if var_type == "continuous":
+                for lag in range(1, self.lookback_periods + 1):
+                    col = f"{var}_lag_{lag}"
+                    df[col] = df[var].shift(lag)
+                    features.append(col)
+            else:
+                lag_cols = expand_categorical_lag_features(
+                    df,
+                    var,
+                    self.lookback_periods,
+                    var_type,
+                    self.label_encoders,
+                    self.one_hot_encoders,
+                    self.one_hot_feature_names,
+                    use_one_hot=self.use_one_hot_parents,
+                )
+                features.extend(lag_cols)
+
+        # Drop rows without full lag history so all nodes share the same time index.
+        df = df.iloc[self.lookback_periods :].dropna()
         X = df[features]
         y = df[node]
-        
+
         if return_dates:
             return X, y, df[self.time_column].reset_index(drop=True)
         return X, y
-    
-    def fit(self):
-        """Train models for each node in the causal graph."""
+
+    def fit(self, verbose: bool = True):
+        """Train type-aware models for each node in the causal graph."""
         for node in self.node_order:
-            print(f"Training model for node: {node}")
+            if verbose:
+                print(f"Training model for node: {node} ({self.variable_types[node]})")
 
             X, y = self._prepare_time_series_data(node)
-            self.models[node] = train_node_model(X, y)
-    
-    def predict(self, steps: int = None, counterfactuals: Optional[Dict[str, float]] = None) -> pd.DataFrame:
+            var_type = self.variable_types[node]
+
+            label_encoder = None
+            if var_type != "continuous":
+                label_encoder = build_label_encoder(y, var_type)
+
+            self.models[node] = train_node_model(X, y, var_type, label_encoder=label_encoder)
+
+    def _future_dates(self, steps: int) -> List[datetime]:
+        last_date = pd.to_datetime(self.data[self.time_column].max())
+        return [last_date + self.time_delta * (i + 1) for i in range(steps)]
+
+    @staticmethod
+    def _resolve_counterfactual(
+        counterfactuals: CounterfactualSpec,
+        node: str,
+        step_idx: int,
+        steps: int,
+    ) -> Optional[object]:
+        if not counterfactuals or node not in counterfactuals:
+            return None
+
+        value = counterfactuals[node]
+        if isinstance(value, list):
+            if len(value) != steps:
+                raise ValueError(
+                    f"Counterfactual for '{node}' has length {len(value)}, expected {steps}."
+                )
+            return value[step_idx]
+        return value
+
+    def _lag_value(
+        self,
+        var: str,
+        lag: int,
+        predictions: List[Dict],
+        historical_data: pd.DataFrame,
+    ) -> float:
+        if len(predictions) < lag:
+            raw = historical_data[var].iloc[-lag]
+        else:
+            raw = predictions[-lag][var]
+
+        return value_for_lag_feature(
+            raw,
+            var,
+            self.variable_types[var],
+            self.label_encoders,
+        )
+
+    def _build_prediction_features(
+        self,
+        node: str,
+        future_date: datetime,
+        predictions: List[Dict],
+        historical_data: pd.DataFrame,
+    ) -> pd.DataFrame:
+        parents = list(self.graph.predecessors(node))
+        time_features = {
+            "year": future_date.year,
+            "month": future_date.month,
+            "day": future_date.day,
+            "dayofweek": future_date.dayofweek,
+        }
+        features = dict(time_features)
+
+        all_vars = parents + ([node] if node not in parents else [])
+        for var in all_vars:
+            var_type = self.variable_types[var]
+            if var_type == "continuous":
+                for lag in range(1, self.lookback_periods + 1):
+                    features[f"{var}_lag_{lag}"] = self._lag_value(var, lag, predictions, historical_data)
+            elif self.use_one_hot_parents and var_type in ("multiclass", "ordinal"):
+                raw = predictions[-1][var] if predictions else historical_data[var].iloc[-1]
+                str_val = str(raw)
+                encoder = self.one_hot_encoders[var]
+                names = self.one_hot_feature_names[var]
+                one_hot = encoder.transform([[str_val]])[0]
+                for lag in range(1, self.lookback_periods + 1):
+                    if len(predictions) < lag:
+                        hist_raw = historical_data[var].iloc[-lag]
+                        vec = encoder.transform([[str(hist_raw)]])[0]
+                    else:
+                        hist_raw = predictions[-lag][var]
+                        vec = encoder.transform([[str(hist_raw)]])[0]
+                    for idx, name in enumerate(names):
+                        features[f"{var}_lag_{lag}_{name}"] = float(vec[idx])
+            else:
+                for lag in range(1, self.lookback_periods + 1):
+                    features[f"{var}_lag_{lag}"] = self._lag_value(var, lag, predictions, historical_data)
+
+        X = pd.DataFrame([features])
+        return X[self.models[node].model.feature_names_in_]
+
+    def predict(
+        self,
+        steps: int = None,
+        counterfactuals: CounterfactualSpec = None,
+        return_proba: bool = False,
+    ) -> pd.DataFrame:
         """
         Make time series predictions using the causal model.
+
+        Args:
+            steps: Forecast horizon
+            counterfactuals: Per-node intervention values. Scalars apply to all steps;
+                lists must have length equal to steps.
+            return_proba: For binary nodes, return probability instead of class label
         """
         steps = steps or self.forecast_horizon
-        predictions = []
-        last_date = pd.to_datetime(self.data[self.time_column].max())
-        
-        # Create future dates
-        future_dates = [last_date + timedelta(days=i+1) for i in range(steps)]
-        
-        # Get the last lookback_periods of actual data
+        predictions: List[Dict] = []
+        future_dates = self._future_dates(steps)
         historical_data = self.data.copy().tail(self.lookback_periods)
-        
-        for future_date in future_dates:
-            pred_row = {'timestamp': future_date}
-            
-            # Create time features for prediction
-            time_features = {
-                'year': future_date.year,
-                'month': future_date.month,
-                'day': future_date.day,
-                'dayofweek': future_date.dayofweek
-            }
-            
-            # Predict each node in topological order
-            for node in self.node_order:
-                if counterfactuals and node in counterfactuals:
-                    pred_row[node] = counterfactuals[node]
-                else:
-                    # Get parent nodes
-                    parents = list(self.graph.predecessors(node))
-                    features = {}
-                    
-                    # Add time features
-                    features.update(time_features)
-                    
-                    # Add lagged features for parents and the node itself
-                    all_vars = parents + ([node] if node not in parents else [])
-                    for var in all_vars:
-                        for lag in range(1, self.lookback_periods + 1):
-                            if len(predictions) < lag:
-                                # Use historical data
-                                val = historical_data[var].iloc[-(lag)]
-                            else:
-                                # Use previously predicted values
-                                val = predictions[-lag][var]
-                            features[f'{var}_lag_{lag}'] = val
-                    
-                    # Create feature DataFrame with correct column order
-                    X = pd.DataFrame([features])
-                    # Ensure feature columns match training data
-                    X = X[self.models[node].feature_names_in_]
-                    
-                    pred_row[node] = float(self.models[node].predict(X)[0])
-            
-            predictions.append(pred_row)
-        
-        return pd.DataFrame(predictions)
-    
-    def predict_in_sample(self) -> pd.DataFrame:
-        """
-        Generate one-step-ahead in-sample predictions for all nodes.
 
-        Uses actual historical values as lag features, so metrics reflect
-        per-node model fit rather than compounding forecast error.
-        """
+        for step_idx, future_date in enumerate(future_dates):
+            pred_row = {self.time_column: future_date}
+
+            for node in self.node_order:
+                intervention = self._resolve_counterfactual(counterfactuals, node, step_idx, steps)
+                if intervention is not None:
+                    pred_row[node] = intervention
+                else:
+                    X = self._build_prediction_features(node, future_date, predictions, historical_data)
+                    pred_row[node] = predict_node_value(
+                        self.models[node],
+                        X,
+                        return_proba=return_proba and self.variable_types[node] == "binary",
+                    )
+
+            predictions.append(pred_row)
+
+        return pd.DataFrame(predictions)
+
+    def predict_in_sample(self) -> pd.DataFrame:
+        """Generate one-step-ahead in-sample predictions for all nodes."""
         dates = None
-        predictions = {}
+        predictions: Dict[str, np.ndarray] = {}
 
         for node in self.node_order:
             if node not in self.models:
                 raise ValueError("Models not fitted. Call fit() before predict_in_sample().")
 
             X, _, node_dates = self._prepare_time_series_data(node, return_dates=True)
-            predictions[node] = self.models[node].predict(X)
+            fitted = self.models[node]
+
+            if fitted.variable_type == "continuous":
+                preds = fitted.model.predict(X)
+            else:
+                encoded = fitted.model.predict(X)
+                preds = np.asarray(
+                    decode_values(encoded, fitted.label_encoder, fitted.variable_type)
+                )
+
+            predictions[node] = preds
 
             if dates is None:
                 dates = node_dates
@@ -190,21 +312,7 @@ class CausalForecaster:
         in_sample: bool = False,
         return_predictions: bool = False,
     ) -> Union[pd.DataFrame, tuple]:
-        """
-        Evaluate forecast accuracy.
-
-        Args:
-            holdout_steps: Number of trailing periods held out for out-of-sample
-                evaluation. Defaults to forecast_horizon.
-            variables: Nodes to evaluate. Defaults to all graph nodes.
-            in_sample: If True, evaluate on training data via predict_in_sample().
-                If False, fit on a temporal train split and evaluate on the holdout.
-            return_predictions: If True, return (metrics, predictions, actual) tuple.
-
-        Returns:
-            DataFrame indexed by variable with mae, mse, rmse, and mape columns,
-            or a tuple of (metrics, predictions, actual) when return_predictions=True.
-        """
+        """Evaluate forecast accuracy with type-aware metrics."""
         variables = variables or list(self.graph.nodes())
 
         if in_sample:
@@ -220,19 +328,18 @@ class CausalForecaster:
             train_data = self.data.iloc[:-holdout_steps]
             test_data = self.data.iloc[-holdout_steps:]
 
-            eval_forecaster = CausalForecaster(
-                data=train_data,
-                graph=self.graph,
-                target=self.target,
-                time_column=self.time_column,
-                forecast_horizon=self.forecast_horizon,
-                lookback_periods=self.lookback_periods,
-            )
-            eval_forecaster.fit()
+            eval_forecaster = self._clone_with_data(train_data)
+            eval_forecaster.fit(verbose=False)
             predictions = eval_forecaster.predict(steps=holdout_steps)
             actual = test_data
 
-        metrics = evaluate_forecast(actual, predictions, self.time_column, variables)
+        metrics = evaluate_forecast_typed(
+            actual,
+            predictions,
+            self.time_column,
+            variables,
+            self.variable_types,
+        )
         if return_predictions:
             return metrics, predictions, actual
         return metrics
@@ -242,11 +349,7 @@ class CausalForecaster:
         variable: str = None,
         holdout_steps: int = None,
     ) -> pd.DataFrame:
-        """
-        Evaluate forecast error at each horizon step for a single variable.
-
-        Useful for identifying where multi-step forecasts degrade.
-        """
+        """Evaluate forecast error at each horizon step for a single variable."""
         variable = variable or self.target
         holdout_steps = holdout_steps or self.forecast_horizon
 
@@ -258,28 +361,114 @@ class CausalForecaster:
         train_data = self.data.iloc[:-holdout_steps]
         test_data = self.data.iloc[-holdout_steps:]
 
-        eval_forecaster = CausalForecaster(
-            data=train_data,
+        eval_forecaster = self._clone_with_data(train_data)
+        eval_forecaster.fit(verbose=False)
+        predictions = eval_forecaster.predict(steps=holdout_steps)
+
+        return evaluate_by_horizon(test_data, predictions, self.time_column, variable)
+
+    def backtest(
+        self,
+        horizon: int = None,
+        min_train_size: int = None,
+        step_size: int = 1,
+        variables: Optional[List[str]] = None,
+        n_jobs: int = 1,
+    ) -> pd.DataFrame:
+        """
+        Walk-forward backtest with expanding training window.
+
+        Each fold retrains only on data strictly before the test window to prevent leakage.
+        """
+        horizon = horizon or self.forecast_horizon
+        variables = variables or list(self.graph.nodes())
+        min_train_size = min_train_size or max(self.lookback_periods * 3, 10)
+
+        if min_train_size + horizon > len(self.data):
+            raise ValueError(
+                "Not enough data for backtest. "
+                f"Need at least min_train_size + horizon ({min_train_size + horizon}) rows."
+            )
+
+        cutoffs = range(min_train_size, len(self.data) - horizon + 1, step_size)
+
+        if n_jobs == 1:
+            records = [self._run_backtest_fold(cutoff, horizon, variables) for cutoff in cutoffs]
+        else:
+            from joblib import Parallel, delayed
+
+            records = Parallel(n_jobs=n_jobs)(
+                delayed(self._run_backtest_fold)(cutoff, horizon, variables) for cutoff in cutoffs
+            )
+
+        return pd.concat(records, ignore_index=True)
+
+    def summarize_backtest(
+        self,
+        backtest_df: pd.DataFrame,
+        metric: str = "rmse",
+    ) -> pd.DataFrame:
+        """Aggregate a backtest result DataFrame."""
+        return summarize_backtest(backtest_df, metric=metric, variable_types=self.variable_types)
+
+    def _run_backtest_fold(
+        self,
+        cutoff: int,
+        horizon: int,
+        variables: List[str],
+    ) -> pd.DataFrame:
+        train_data = self.data.iloc[:cutoff]
+        test_data = self.data.iloc[cutoff : cutoff + horizon]
+
+        fold_forecaster = self._clone_with_data(train_data)
+        fold_forecaster.fit(verbose=False)
+        predictions = fold_forecaster.predict(steps=horizon)
+
+        actual_time = self.time_column
+        pred_time = self.time_column if self.time_column in predictions.columns else "timestamp"
+
+        rows = []
+        for step_idx in range(horizon):
+            for var in variables:
+                actual_val = test_data.iloc[step_idx][var]
+                pred_val = predictions.iloc[step_idx][var]
+                rows.append(
+                    {
+                        "fold": cutoff,
+                        "train_end": train_data[self.time_column].iloc[-1],
+                        "horizon_step": step_idx + 1,
+                        "timestamp": test_data.iloc[step_idx][actual_time],
+                        "variable": var,
+                        "variable_type": self.variable_types[var],
+                        "actual": actual_val,
+                        "predicted": pred_val,
+                    }
+                )
+
+        return pd.DataFrame(rows)
+
+    def _clone_with_data(self, data: pd.DataFrame) -> "CausalForecaster":
+        return CausalForecaster(
+            data=data,
             graph=self.graph,
             target=self.target,
             time_column=self.time_column,
             forecast_horizon=self.forecast_horizon,
             lookback_periods=self.lookback_periods,
+            variable_types=self.variable_types,
+            use_one_hot_parents=self.use_one_hot_parents,
         )
-        eval_forecaster.fit()
-        predictions = eval_forecaster.predict(steps=holdout_steps)
 
-        return evaluate_by_horizon(test_data, predictions, self.time_column, variable)
-
-    def run_counterfactual(self, interventions: Dict[str, float], steps: int = None) -> pd.DataFrame:
+    def run_counterfactual(
+        self,
+        interventions: CounterfactualSpec,
+        steps: int = None,
+    ) -> pd.DataFrame:
         """
         Run a counterfactual scenario.
-        
+
         Args:
-            interventions: Dictionary of node names and their intervention values
+            interventions: Per-node values (scalar or list with length == steps)
             steps: Number of steps to forecast
-            
-        Returns:
-            DataFrame with counterfactual predictions
         """
-        return self.predict(steps=steps, counterfactuals=interventions) 
+        return self.predict(steps=steps, counterfactuals=interventions)

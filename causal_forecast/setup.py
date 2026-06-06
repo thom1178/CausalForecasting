@@ -13,6 +13,7 @@ setup(
         "matplotlib>=3.3.0",
         "seaborn>=0.11.0",
         "statsmodels>=0.12.0",
+        "joblib>=1.0.0",
     ],
     author="Jamel Thomas",
     author_email="contact@jamelt.com",
