@@ -13,6 +13,7 @@ A Python package for **causal time-series forecasting**. Given a directed acycli
 - Evaluates fit quality with type-aware metrics
 - Backtests with walk-forward expanding windows (no data leakage)
 - Infers time frequency from data (daily, weekly, monthly, etc.)
+- Optional weekly, monthly, and yearly seasonality (cyclical features + seasonal lags)
 
 ## Installation
 
@@ -84,7 +85,7 @@ See [`analytics/example.ipynb`](analytics/example.ipynb) for a full walkthrough 
 ## How it works
 
 1. **Type detection** — Each graph node is classified as `continuous`, `binary`, `multiclass`, or `ordinal`.
-2. **Feature engineering** — Calendar features (`year`, `month`, `day`, `dayofweek`) plus lagged values for parents and self.
+2. **Feature engineering** — Calendar features (`year`, `month`, `day`, `dayofweek`) plus short-term lags. Optionally adds cyclical sin/cos encodings and seasonal lag features (`weekly`, `monthly`, `yearly`).
 3. **Per-node training** — Nodes are fit in topological order. Continuous nodes use `RandomForestRegressor`; categorical nodes use `RandomForestClassifier`.
 4. **Multi-step prediction** — Each future step predicts all nodes in DAG order. Lag features use historical data for early steps, then prior predictions.
 5. **Counterfactuals** — Intervened nodes are overridden; downstream nodes still propagate through the graph.
@@ -108,6 +109,40 @@ forecaster = CausalForecaster(
 ```
 
 Or supply types explicitly with `variable_types={...}` to skip detection entirely.
+
+## Seasonality (opt-in)
+
+Seasonality is **disabled by default** for backward compatibility. Enable explicitly:
+
+```python
+forecaster = CausalForecaster(
+    data, G, "crop_yield", "timestamp",
+    lookback_periods=7,
+    seasonality=["weekly", "monthly", "yearly"],
+)
+```
+
+When enabled, the model adds:
+- **Cyclical features** — `dayofweek_sin/cos`, `month_sin/cos`, `dayofyear_sin/cos`
+- **Seasonal lag features** — `{var}_s_lag_weekly`, `{var}_s_lag_monthly`, `{var}_s_lag_yearly`
+
+Seasonal lag periods depend on inferred data frequency:
+
+| Data frequency | weekly | monthly | yearly |
+|----------------|--------|---------|--------|
+| daily | 7 steps | 30 steps | 365 steps |
+| weekly | — | 4 steps | 52 steps |
+| monthly | — | — | 12 steps |
+
+Minimum data length: `period + lookback_periods + 1` rows (e.g. 373 rows for yearly seasonality with `lookback_periods=7` on daily data).
+
+Decomposition plots accept a seasonality type:
+
+```python
+plot_seasonal_decomposition(data, "timestamp", "temperature", seasonality="weekly")
+plot_seasonal_decomposition(data, "timestamp", "temperature", seasonality="monthly")
+plot_seasonal_decomposition(data, "timestamp", "temperature", seasonality="yearly")
+```
 
 ## Forecasting and counterfactuals
 
@@ -216,6 +251,7 @@ CausalForecaster(
     variable_types: dict = None,      # skip auto-detection
     type_overrides: dict = None,      # override specific nodes
     use_one_hot_parents: bool = True, # one-hot encode multiclass/ordinal parent lags
+    seasonality: list = None,        # opt-in: ['weekly', 'monthly', 'yearly']
 )
 ```
 
@@ -235,6 +271,9 @@ CausalForecaster(
 ```python
 from causal_forecast import (
     detect_variable_types,
+    infer_data_frequency,
+    seasonal_periods,
+    decomposition_period,
     evaluate_forecast,
     evaluate_forecast_typed,
     evaluate_variable,
@@ -248,6 +287,9 @@ from causal_forecast import (
 | Function | Description |
 |----------|-------------|
 | `detect_variable_types(data, graph, time_column, overrides)` | Auto-detect node types |
+| `infer_data_frequency(time_delta)` | Map timestep to daily/weekly/monthly/yearly |
+| `seasonal_periods(frequency, names)` | Lag step counts per seasonality type |
+| `decomposition_period(seasonality, time_delta)` | Period for statsmodels decomposition |
 | `evaluate_forecast_typed(actual, predicted, time_column, variables, variable_types)` | Metrics per variable type |
 | `summarize_fit_quality(metrics_df, metric, use_type_aware_metric)` | Rank good vs poor fits |
 | `summarize_backtest(backtest_df, metric, variable_types)` | Aggregate fold results |
@@ -262,6 +304,7 @@ CausalForecasting/
 │   ├── typing.py      # Variable type detection
 │   ├── utils.py       # Model training and encoding
 │   ├── metrics.py     # Evaluation and backtest summaries
+│   ├── seasonality.py # Seasonal features and period mapping
 │   └── viz.py         # Plotting helpers
 ├── analytics/
 │   └── example.ipynb  # End-to-end demo

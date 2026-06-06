@@ -1,5 +1,10 @@
 from .core import CausalForecaster
 from .typing import VariableType, detect_variable_types
+from .seasonality import (
+    infer_data_frequency,
+    seasonal_periods,
+    decomposition_period,
+)
 from .metrics import (
     mae,
     mse,

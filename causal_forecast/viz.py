@@ -8,6 +8,9 @@ from datetime import datetime
 
 from statsmodels.tsa.seasonal import seasonal_decompose
 
+from .seasonality import decomposition_period
+from .utils import infer_time_delta
+
 def plot_time_series(
     data: pd.DataFrame,
     time_column: str,
@@ -81,24 +84,28 @@ def plot_seasonal_decomposition(
     data: pd.DataFrame,
     time_column: str,
     variable: str,
-    figsize: tuple = (12, 10)
+    figsize: tuple = (12, 10),
+    period: int = None,
+    seasonality: str = "weekly",
 ) -> plt.Figure:
     """
     Plot seasonal decomposition of time series.
-    
+
     Args:
         data: DataFrame containing time series data
         time_column: Name of the time column
         variable: Variable to decompose
         figsize: Figure size
+        period: Decomposition period override (in timesteps)
+        seasonality: Seasonality type ('weekly', 'monthly', 'yearly') used when period is None
     """
-    
-    
-    # Convert to datetime index
     ts_data = data.set_index(time_column)[variable]
-    
-    # Perform decomposition
-    decomposition = seasonal_decompose(ts_data, period=30)
+
+    if period is None:
+        time_delta = infer_time_delta(data[time_column])
+        period = decomposition_period(seasonality=seasonality, time_delta=time_delta)
+
+    decomposition = seasonal_decompose(ts_data, period=period)
     
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=figsize)
     
@@ -112,7 +119,7 @@ def plot_seasonal_decomposition(
     
     # Plot seasonal
     decomposition.seasonal.plot(ax=ax3)
-    ax3.set_title('Seasonal')
+    ax3.set_title(f'Seasonal (period={period})')
     
     # Plot residual
     decomposition.resid.plot(ax=ax4)

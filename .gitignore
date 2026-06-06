@@ -14,6 +14,7 @@ dist/
 *.egg-info/
 *.egg
 *.whl
+*.pyc
 
 # Testing
 .pytest_cache/

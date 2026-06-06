@@ -21,6 +21,13 @@ from .metrics import (
     evaluate_forecast_typed,
     summarize_backtest,
 )
+from .seasonality import (
+    add_cyclical_time_features,
+    add_seasonal_lag_features,
+    cyclical_features_from_date,
+    infer_data_frequency,
+    validate_seasonality,
+)
 
 CounterfactualValue = Union[float, int, str, List[Union[float, int, str]]]
 CounterfactualSpec = Optional[Dict[str, CounterfactualValue]]
@@ -42,6 +49,7 @@ class CausalForecaster:
         variable_types: Optional[Dict[str, VariableType]] = None,
         type_overrides: Optional[Dict[str, VariableType]] = None,
         use_one_hot_parents: bool = True,
+        seasonality: Optional[List[str]] = None,
     ):
         """
         Initialize the CausalForecaster.
@@ -56,6 +64,7 @@ class CausalForecaster:
             variable_types: Explicit variable types per node (skips auto-detection)
             type_overrides: Overrides applied on top of auto-detection
             use_one_hot_parents: One-hot encode multiclass/ordinal parent lags (Phase 2)
+            seasonality: Opt-in seasonal patterns ('weekly', 'monthly', 'yearly')
         """
         self.data = data.copy()
         self.graph = graph.copy()
@@ -64,6 +73,7 @@ class CausalForecaster:
         self.forecast_horizon = forecast_horizon
         self.lookback_periods = lookback_periods
         self.use_one_hot_parents = use_one_hot_parents
+        self.seasonality = seasonality or []
 
         validate_graph_data(self.data, self.graph, self.target)
         self.data = self.data.sort_values(time_column).reset_index(drop=True)
@@ -83,6 +93,16 @@ class CausalForecaster:
         self.one_hot_encoders: Dict[str, object] = {}
         self.one_hot_feature_names: Dict[str, List[str]] = {}
         self.time_delta = infer_time_delta(self.data[self.time_column])
+        self.data_frequency = infer_data_frequency(self.time_delta)
+        self.seasonal_periods = validate_seasonality(
+            len(self.data),
+            self.lookback_periods,
+            self.seasonality,
+            self.data_frequency,
+        )
+        seasonal_values = list(self.seasonal_periods.values())
+        self.max_history = max([self.lookback_periods] + seasonal_values)
+        self.cyclical_features: List[str] = []
         self.node_order = list(nx.topological_sort(self.graph))
 
     def _create_time_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -93,6 +113,10 @@ class CausalForecaster:
         df["month"] = dt.dt.month
         df["day"] = dt.dt.day
         df["dayofweek"] = dt.dt.dayofweek
+
+        if self.seasonal_periods:
+            df, self.cyclical_features = add_cyclical_time_features(df, self.time_column)
+
         return df
 
     def _prepare_time_series_data(self, node: str, return_dates: bool = False) -> tuple:
@@ -102,6 +126,8 @@ class CausalForecaster:
         features: List[str] = []
 
         time_features = ["year", "month", "day", "dayofweek"]
+        if self.cyclical_features:
+            time_features.extend(self.cyclical_features)
         features.extend(time_features)
 
         all_vars = parents + ([node] if node not in parents else [])
@@ -125,8 +151,21 @@ class CausalForecaster:
                 )
                 features.extend(lag_cols)
 
+            if self.seasonal_periods:
+                seasonal_cols = add_seasonal_lag_features(
+                    df,
+                    var,
+                    self.seasonal_periods,
+                    var_type,
+                    self.label_encoders,
+                    self.one_hot_encoders,
+                    self.one_hot_feature_names,
+                    use_one_hot=self.use_one_hot_parents,
+                )
+                features.extend(seasonal_cols)
+
         # Drop rows without full lag history so all nodes share the same time index.
-        df = df.iloc[self.lookback_periods :].dropna()
+        df = df.iloc[self.max_history :].dropna()
         X = df[features]
         y = df[node]
 
@@ -172,6 +211,18 @@ class CausalForecaster:
             return value[step_idx]
         return value
 
+    def _lag_raw_value(
+        self,
+        var: str,
+        lag: int,
+        predictions: List[Dict],
+        historical_data: pd.DataFrame,
+    ) -> object:
+        if len(predictions) >= lag:
+            return predictions[-lag][var]
+        offset = lag - len(predictions)
+        return historical_data[var].iloc[-offset]
+
     def _lag_value(
         self,
         var: str,
@@ -179,11 +230,7 @@ class CausalForecaster:
         predictions: List[Dict],
         historical_data: pd.DataFrame,
     ) -> float:
-        if len(predictions) < lag:
-            raw = historical_data[var].iloc[-lag]
-        else:
-            raw = predictions[-lag][var]
-
+        raw = self._lag_raw_value(var, lag, predictions, historical_data)
         return value_for_lag_feature(
             raw,
             var,
@@ -205,6 +252,8 @@ class CausalForecaster:
             "day": future_date.day,
             "dayofweek": future_date.dayofweek,
         }
+        if self.seasonal_periods:
+            time_features.update(cyclical_features_from_date(future_date))
         features = dict(time_features)
 
         all_vars = parents + ([node] if node not in parents else [])
@@ -214,23 +263,29 @@ class CausalForecaster:
                 for lag in range(1, self.lookback_periods + 1):
                     features[f"{var}_lag_{lag}"] = self._lag_value(var, lag, predictions, historical_data)
             elif self.use_one_hot_parents and var_type in ("multiclass", "ordinal"):
-                raw = predictions[-1][var] if predictions else historical_data[var].iloc[-1]
-                str_val = str(raw)
                 encoder = self.one_hot_encoders[var]
                 names = self.one_hot_feature_names[var]
-                one_hot = encoder.transform([[str_val]])[0]
                 for lag in range(1, self.lookback_periods + 1):
-                    if len(predictions) < lag:
-                        hist_raw = historical_data[var].iloc[-lag]
-                        vec = encoder.transform([[str(hist_raw)]])[0]
-                    else:
-                        hist_raw = predictions[-lag][var]
-                        vec = encoder.transform([[str(hist_raw)]])[0]
+                    hist_raw = self._lag_raw_value(var, lag, predictions, historical_data)
+                    vec = encoder.transform([[str(hist_raw)]])[0]
                     for idx, name in enumerate(names):
                         features[f"{var}_lag_{lag}_{name}"] = float(vec[idx])
             else:
                 for lag in range(1, self.lookback_periods + 1):
                     features[f"{var}_lag_{lag}"] = self._lag_value(var, lag, predictions, historical_data)
+
+            if self.seasonal_periods:
+                for season_name, period in self.seasonal_periods.items():
+                    col = f"{var}_s_lag_{season_name}"
+                    if var_type == "continuous":
+                        features[col] = self._lag_value(var, period, predictions, historical_data)
+                    elif self.use_one_hot_parents and var_type in ("multiclass", "ordinal"):
+                        hist_raw = self._lag_raw_value(var, period, predictions, historical_data)
+                        vec = self.one_hot_encoders[var].transform([[str(hist_raw)]])[0]
+                        for idx, name in enumerate(self.one_hot_feature_names[var]):
+                            features[f"{col}_{name}"] = float(vec[idx])
+                    else:
+                        features[col] = self._lag_value(var, period, predictions, historical_data)
 
         X = pd.DataFrame([features])
         return X[self.models[node].model.feature_names_in_]
@@ -253,7 +308,7 @@ class CausalForecaster:
         steps = steps or self.forecast_horizon
         predictions: List[Dict] = []
         future_dates = self._future_dates(steps)
-        historical_data = self.data.copy().tail(self.lookback_periods)
+        historical_data = self.data.copy().tail(self.max_history)
 
         for step_idx, future_date in enumerate(future_dates):
             pred_row = {self.time_column: future_date}
@@ -457,6 +512,7 @@ class CausalForecaster:
             lookback_periods=self.lookback_periods,
             variable_types=self.variable_types,
             use_one_hot_parents=self.use_one_hot_parents,
+            seasonality=self.seasonality,
         )
 
     def run_counterfactual(
