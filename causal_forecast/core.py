@@ -29,6 +29,11 @@ from .seasonality import (
     infer_data_frequency,
     validate_seasonality,
 )
+from .model_summary import (
+    summarize_models,
+    summarize_models_detailed,
+    summarize_node_model,
+)
 
 CounterfactualValue = Union[float, int, str, List[Union[float, int, str]]]
 CounterfactualSpec = Optional[Dict[str, CounterfactualValue]]
@@ -200,6 +205,35 @@ class CausalForecaster:
                 label_encoder=label_encoder,
                 model_type=self.model_type,
             )
+
+    def summarize_models(self, detailed: bool = False) -> Union[pd.DataFrame, tuple]:
+        """
+        Summarize each fitted per-node model.
+
+        Args:
+            detailed: If True, return (overview_df, details_dict) where details_dict
+                maps node names to coefficient/importance tables.
+
+        Returns:
+            Overview DataFrame indexed by node, or tuple with detailed tables.
+        """
+        if not self.models:
+            raise ValueError("No fitted models to summarize. Call fit() first.")
+
+        overview = summarize_models(
+            self.models,
+            self.variable_types,
+            node_order=self.node_order,
+        )
+        if detailed:
+            return overview, summarize_models_detailed(self.models, node_order=self.node_order)
+        return overview
+
+    def summarize_model(self, node: str) -> pd.DataFrame:
+        """Detailed summary for a single node's fitted model."""
+        if node not in self.models:
+            raise ValueError(f"No fitted model for node '{node}'. Available: {list(self.models)}")
+        return summarize_node_model(self.models[node], node)
 
     def _future_dates(self, steps: int) -> List[datetime]:
         last_date = pd.to_datetime(self.data[self.time_column].max())

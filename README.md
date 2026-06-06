@@ -287,6 +287,8 @@ CausalForecaster(
 | `evaluate_horizon(variable, holdout_steps)` | Per-step error for one variable |
 | `backtest(horizon, min_train_size, step_size, n_jobs)` | Walk-forward backtest |
 | `summarize_backtest(backtest_df, metric)` | Aggregate backtest folds |
+| `summarize_models(detailed=False)` | Overview of each fitted node model |
+| `summarize_model(node)` | GLM coefficients or RF feature importances for one node |
 
 ### Standalone utilities
 
@@ -315,6 +317,8 @@ from causal_forecast import (
 | `evaluate_forecast_typed(actual, predicted, time_column, variables, variable_types)` | Metrics per variable type |
 | `summarize_fit_quality(metrics_df, metric, use_type_aware_metric)` | Rank good vs poor fits |
 | `summarize_backtest(backtest_df, metric, variable_types)` | Aggregate fold results |
+| `forecaster.summarize_models(detailed=False)` | Overview of each fitted node model |
+| `forecaster.summarize_model(node)` | Coefficients (GLM) or importances (RF) for one node |
 | `primary_metric_for_type(variable_type)` | Default metric name per type |
 
 ## Project structure
