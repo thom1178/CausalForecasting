@@ -161,3 +161,65 @@ def plot_counterfactual_timeseries(
     plt.tight_layout()
     return fig
 
+def plot_residuals(
+    actual: pd.DataFrame,
+    predicted: pd.DataFrame,
+    time_column: str,
+    variable: str,
+    figsize: tuple = (12, 6),
+) -> plt.Figure:
+    """
+    Plot prediction residuals over time to highlight periods of poor fit.
+    """
+    pred_time = time_column if time_column in predicted.columns else "timestamp"
+
+    merged = actual[[time_column, variable]].merge(
+        predicted[[pred_time, variable]],
+        left_on=time_column,
+        right_on=pred_time,
+        suffixes=("_actual", "_pred"),
+    )
+    if pred_time != time_column and pred_time in merged.columns:
+        merged = merged.drop(columns=[pred_time])
+
+    merged["residual"] = merged[f"{variable}_pred"] - merged[f"{variable}_actual"]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, sharex=True)
+
+    ax1.plot(merged[time_column], merged[f"{variable}_actual"], label="Actual", marker=".")
+    ax1.plot(merged[time_column], merged[f"{variable}_pred"], label="Predicted", linestyle="--", marker=".")
+    ax1.set_title(f"Actual vs Predicted: {variable}")
+    ax1.legend()
+
+    ax2.bar(merged[time_column], merged["residual"], width=0.8, color="steelblue", alpha=0.7)
+    ax2.axhline(0, color="black", linewidth=0.8)
+    ax2.set_title("Residuals (Predicted - Actual)")
+    ax2.set_xlabel("Time")
+
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    return fig
+
+def plot_metrics_summary(
+    metrics_df: pd.DataFrame,
+    metric: str = "rmse",
+    figsize: tuple = (10, 5),
+) -> plt.Figure:
+    """
+    Bar chart of per-variable metrics to compare fit quality across nodes.
+    """
+    if metric not in metrics_df.columns:
+        raise ValueError(f"Metric '{metric}' not found. Available: {list(metrics_df.columns)}")
+
+    sorted_metrics = metrics_df[metric].sort_values()
+    colors = ["#2ecc71" if v <= sorted_metrics.median() else "#e74c3c" for v in sorted_metrics]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    sorted_metrics.plot(kind="barh", ax=ax, color=colors)
+    ax.axvline(sorted_metrics.median(), color="gray", linestyle="--", label=f"Median {metric}")
+    ax.set_xlabel(metric.upper())
+    ax.set_title(f"Per-Variable Fit Quality ({metric.upper()})")
+    ax.legend()
+    plt.tight_layout()
+    return fig
+

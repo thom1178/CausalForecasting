@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Union
 from sklearn.ensemble import RandomForestRegressor
 from datetime import datetime, timedelta
 from .utils import validate_graph_data, train_node_model
+from .metrics import evaluate_forecast, evaluate_by_horizon
 
 class CausalForecaster:
     """
@@ -59,7 +60,7 @@ class CausalForecaster:
         df['dayofweek'] = pd.to_datetime(df[self.time_column]).dt.dayofweek
         return df
     
-    def _prepare_time_series_data(self, node: str) -> tuple:
+    def _prepare_time_series_data(self, node: str, return_dates: bool = False) -> tuple:
         """Prepare time series data with lagged features."""
         df = self._create_time_features(self.data)
         
@@ -84,6 +85,8 @@ class CausalForecaster:
         X = df[features]
         y = df[node]
         
+        if return_dates:
+            return X, y, df[self.time_column].reset_index(drop=True)
         return X, y
     
     def fit(self):
@@ -154,6 +157,120 @@ class CausalForecaster:
         
         return pd.DataFrame(predictions)
     
+    def predict_in_sample(self) -> pd.DataFrame:
+        """
+        Generate one-step-ahead in-sample predictions for all nodes.
+
+        Uses actual historical values as lag features, so metrics reflect
+        per-node model fit rather than compounding forecast error.
+        """
+        dates = None
+        predictions = {}
+
+        for node in self.node_order:
+            if node not in self.models:
+                raise ValueError("Models not fitted. Call fit() before predict_in_sample().")
+
+            X, _, node_dates = self._prepare_time_series_data(node, return_dates=True)
+            predictions[node] = self.models[node].predict(X)
+
+            if dates is None:
+                dates = node_dates
+            elif not dates.equals(node_dates):
+                raise ValueError("Inconsistent date alignment across nodes during in-sample prediction.")
+
+        result = pd.DataFrame(predictions)
+        result[self.time_column] = dates.values
+        return result[[self.time_column] + self.node_order]
+
+    def evaluate(
+        self,
+        holdout_steps: int = None,
+        variables: Optional[List[str]] = None,
+        in_sample: bool = False,
+        return_predictions: bool = False,
+    ) -> Union[pd.DataFrame, tuple]:
+        """
+        Evaluate forecast accuracy.
+
+        Args:
+            holdout_steps: Number of trailing periods held out for out-of-sample
+                evaluation. Defaults to forecast_horizon.
+            variables: Nodes to evaluate. Defaults to all graph nodes.
+            in_sample: If True, evaluate on training data via predict_in_sample().
+                If False, fit on a temporal train split and evaluate on the holdout.
+            return_predictions: If True, return (metrics, predictions, actual) tuple.
+
+        Returns:
+            DataFrame indexed by variable with mae, mse, rmse, and mape columns,
+            or a tuple of (metrics, predictions, actual) when return_predictions=True.
+        """
+        variables = variables or list(self.graph.nodes())
+
+        if in_sample:
+            predictions = self.predict_in_sample()
+            actual = self.data
+        else:
+            holdout_steps = holdout_steps or self.forecast_horizon
+            if holdout_steps >= len(self.data):
+                raise ValueError(
+                    f"holdout_steps ({holdout_steps}) must be less than data length ({len(self.data)})."
+                )
+
+            train_data = self.data.iloc[:-holdout_steps]
+            test_data = self.data.iloc[-holdout_steps:]
+
+            eval_forecaster = CausalForecaster(
+                data=train_data,
+                graph=self.graph,
+                target=self.target,
+                time_column=self.time_column,
+                forecast_horizon=self.forecast_horizon,
+                lookback_periods=self.lookback_periods,
+            )
+            eval_forecaster.fit()
+            predictions = eval_forecaster.predict(steps=holdout_steps)
+            actual = test_data
+
+        metrics = evaluate_forecast(actual, predictions, self.time_column, variables)
+        if return_predictions:
+            return metrics, predictions, actual
+        return metrics
+
+    def evaluate_horizon(
+        self,
+        variable: str = None,
+        holdout_steps: int = None,
+    ) -> pd.DataFrame:
+        """
+        Evaluate forecast error at each horizon step for a single variable.
+
+        Useful for identifying where multi-step forecasts degrade.
+        """
+        variable = variable or self.target
+        holdout_steps = holdout_steps or self.forecast_horizon
+
+        if holdout_steps >= len(self.data):
+            raise ValueError(
+                f"holdout_steps ({holdout_steps}) must be less than data length ({len(self.data)})."
+            )
+
+        train_data = self.data.iloc[:-holdout_steps]
+        test_data = self.data.iloc[-holdout_steps:]
+
+        eval_forecaster = CausalForecaster(
+            data=train_data,
+            graph=self.graph,
+            target=self.target,
+            time_column=self.time_column,
+            forecast_horizon=self.forecast_horizon,
+            lookback_periods=self.lookback_periods,
+        )
+        eval_forecaster.fit()
+        predictions = eval_forecaster.predict(steps=holdout_steps)
+
+        return evaluate_by_horizon(test_data, predictions, self.time_column, variable)
+
     def run_counterfactual(self, interventions: Dict[str, float], steps: int = None) -> pd.DataFrame:
         """
         Run a counterfactual scenario.
