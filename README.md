@@ -1,145 +1,29 @@
 # Causal Forecast
 
-A Python package for causal forecasting that combines structural causal models with time series analysis. This package allows you to:
-- Build and analyze causal relationships in time series data
-- Automatically detect continuous, binary, multiclass, and ordinal variables
-- Make forecasts that respect causal structure with nonlinear RandomForest models
-- Run counterfactual scenarios (scalar or per-horizon interventions)
-- Backtest with walk-forward expanding windows (no data leakage)
-- Evaluate fit quality with type-aware metrics
+A Python package for **causal time-series forecasting**. Given a directed acyclic graph (DAG) of variable relationships and historical data, Causal Forecast trains one model per node, predicts in topological order, and propagates effects through the graph — supporting continuous, binary, multiclass, and ordinal variables.
+
+**Version:** 0.2.0
+
+## What it does
+
+- Accepts a user-defined DAG and automatically detects variable types
+- Trains nonlinear RandomForest models per node (regression or classification)
+- Forecasts multiple steps ahead using lag features and calendar time features
+- Runs counterfactual what-if scenarios (fixed or per-horizon interventions)
+- Evaluates fit quality with type-aware metrics
+- Backtests with walk-forward expanding windows (no data leakage)
+- Infers time frequency from data (daily, weekly, monthly, etc.)
 
 ## Installation
 
-### From Source
 ```bash
 git clone https://github.com/thom1178/CausalForecasting.git
 cd CausalForecasting
 pip install -e causal_forecast
 ```
 
-## Quick Start
+### Requirements
 
-```python
-import networkx as nx
-import pandas as pd
-import numpy as np
-from causal_forecast import CausalForecaster, detect_variable_types
-
-dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='D')
-data = pd.DataFrame({
-    'timestamp': dates,
-    'temperature': np.random.normal(25, 5, len(dates)),
-    'humidity': np.random.normal(60, 3, len(dates)),
-    'rain': np.random.binomial(1, 0.3, len(dates)),
-    'crop_yield': np.random.normal(90, 10, len(dates)),
-})
-
-G = nx.DiGraph()
-G.add_edges_from([
-    ('temperature', 'humidity'),
-    ('temperature', 'rain'),
-    ('humidity', 'crop_yield'),
-    ('rain', 'crop_yield'),
-])
-
-# Auto-detect variable types
-print(detect_variable_types(data, G, 'timestamp'))
-
-forecaster = CausalForecaster(
-    data=data,
-    graph=G,
-    target='crop_yield',
-    time_column='timestamp',
-    forecast_horizon=30,
-    lookback_periods=7,
-)
-
-forecaster.fit()
-future_predictions = forecaster.predict(steps=30)
-
-# Per-horizon counterfactual (list length must equal horizon)
-counterfactual = forecaster.run_counterfactual({
-    'temperature': list(np.linspace(30, 40, 30))
-})
-
-# Type-aware evaluation
-metrics = forecaster.evaluate(holdout_steps=30)
-print(metrics)
-
-# Walk-forward backtest (no leakage)
-backtest_results = forecaster.backtest(horizon=10, min_train_size=60, step_size=10)
-summary = forecaster.summarize_backtest(backtest_results)
-print(summary)
-```
-
-## Features
-
-### Automatic Variable Type Detection
-- **continuous**: numeric variables with many unique values
-- **binary**: two-class flags (0/1, yes/no)
-- **multiclass**: categorical strings or low-cardinality integers
-- **ordinal**: ordered pandas `CategoricalDtype`
-
-Override detection with `type_overrides={'rain': 'binary'}`.
-
-### Type-Aware Models
-| Type | Model | Metrics |
-|------|-------|---------|
-| continuous | RandomForestRegressor | MAE, RMSE, MAPE |
-| binary | RandomForestClassifier | accuracy, F1, Brier score |
-| multiclass | RandomForestClassifier | accuracy, macro-F1, log loss |
-| ordinal | RandomForestClassifier | accuracy, ordinal MAE |
-
-### Walk-Forward Backtest
-`backtest()` uses an expanding training window. Each fold retrains only on data strictly before the test window. Use `n_jobs > 1` for parallel folds.
-
-### Counterfactuals
-- Scalar: `{'temperature': 35}` applies to all steps
-- Per-horizon: `{'temperature': [35, 36, 37, ...]}` list length must equal `steps`
-
-### Visualization
-```python
-from causal_forecast import (
-    plot_time_series,
-    plot_forecast_comparison,
-    plot_seasonal_decomposition,
-    plot_counterfactual_timeseries,
-    plot_residuals,
-    plot_metrics_summary,
-)
-
-plot_time_series(data, 'timestamp', ['temperature', 'crop_yield'])
-plot_forecast_comparison(actual_data, predictions, 'timestamp', 'crop_yield')
-plot_metrics_summary(metrics, metric='rmse')
-plot_residuals(holdout_data, predictions, 'timestamp', 'crop_yield')
-```
-
-## API Reference
-
-### CausalForecaster
-```python
-CausalForecaster(
-    data: pd.DataFrame,
-    graph: nx.DiGraph,
-    target: str,
-    time_column: str,
-    forecast_horizon: int = 1,
-    lookback_periods: int = 3,
-    type_overrides: dict = None,
-    use_one_hot_parents: bool = True,
-)
-```
-
-### Key Methods
-- `fit(verbose=True)`: Train type-aware models per node
-- `predict(steps, counterfactuals)`: Multi-step forecast
-- `run_counterfactual(interventions, steps)`: What-if scenarios
-- `evaluate(holdout_steps, in_sample=False)`: Type-aware metrics
-- `backtest(horizon, min_train_size, step_size, n_jobs=1)`: Walk-forward backtest
-- `summarize_backtest(backtest_df)`: Aggregate backtest results
-- `detect_variable_types(data, graph, time_column)`: Standalone type detection
-
-## Requirements
 - Python ≥ 3.7
 - networkx ≥ 2.5
 - pandas ≥ 1.0.0
@@ -150,5 +34,252 @@ CausalForecaster(
 - statsmodels ≥ 0.12.0
 - joblib ≥ 1.0.0
 
+## Quick start
+
+```python
+import networkx as nx
+import numpy as np
+import pandas as pd
+from causal_forecast import CausalForecaster, detect_variable_types
+
+# Mixed-type time series: continuous, binary, multiclass
+dates = pd.date_range("2023-01-01", "2023-12-31", freq="D")
+data = pd.DataFrame({
+    "timestamp": dates,
+    "temperature": np.random.normal(25, 5, len(dates)),
+    "humidity": np.random.normal(60, 3, len(dates)),
+    "rain": np.random.binomial(1, 0.3, len(dates)),
+    "region": np.random.choice(["North", "South", "East"], len(dates)),
+    "crop_yield": np.random.normal(90, 10, len(dates)),
+})
+
+G = nx.DiGraph()
+G.add_edges_from([
+    ("temperature", "humidity"),
+    ("temperature", "rain"),
+    ("region", "crop_yield"),
+    ("humidity", "crop_yield"),
+    ("rain", "crop_yield"),
+])
+
+print(detect_variable_types(data, G, "timestamp"))
+# {'temperature': 'continuous', 'humidity': 'continuous', 'rain': 'binary',
+#  'region': 'multiclass', 'crop_yield': 'continuous'}
+
+forecaster = CausalForecaster(
+    data=data,
+    graph=G,
+    target="crop_yield",
+    time_column="timestamp",
+    forecast_horizon=30,
+    lookback_periods=7,
+)
+
+forecaster.fit()
+predictions = forecaster.predict(steps=30)
+```
+
+See [`analytics/example.ipynb`](analytics/example.ipynb) for a full walkthrough with evaluation plots.
+
+## How it works
+
+1. **Type detection** — Each graph node is classified as `continuous`, `binary`, `multiclass`, or `ordinal`.
+2. **Feature engineering** — Calendar features (`year`, `month`, `day`, `dayofweek`) plus lagged values for parents and self.
+3. **Per-node training** — Nodes are fit in topological order. Continuous nodes use `RandomForestRegressor`; categorical nodes use `RandomForestClassifier`.
+4. **Multi-step prediction** — Each future step predicts all nodes in DAG order. Lag features use historical data for early steps, then prior predictions.
+5. **Counterfactuals** — Intervened nodes are overridden; downstream nodes still propagate through the graph.
+
+## Variable type detection
+
+| Type | Detection rule | Example |
+|------|----------------|---------|
+| `continuous` | Numeric with many unique values | temperature, revenue |
+| `binary` | Exactly two values (0/1, yes/no) | rain, churn |
+| `multiclass` | Object/category dtype or low-cardinality integer | region, SKU |
+| `ordinal` | Ordered pandas `CategoricalDtype` | low / medium / high |
+
+Override auto-detection:
+
+```python
+forecaster = CausalForecaster(
+    data, G, "crop_yield", "timestamp",
+    type_overrides={"rain": "binary"},
+)
+```
+
+Or supply types explicitly with `variable_types={...}` to skip detection entirely.
+
+## Forecasting and counterfactuals
+
+```python
+# Baseline forecast
+predictions = forecaster.predict(steps=30)
+
+# Scalar intervention — same value every step
+cf_fixed = forecaster.run_counterfactual({"temperature": 35}, steps=30)
+
+# Per-horizon intervention — list length must equal steps
+cf_ramp = forecaster.run_counterfactual(
+    {"temperature": list(np.linspace(30, 40, 30))},
+    steps=30,
+)
+```
+
+## Evaluation
+
+### Holdout and in-sample
+
+```python
+from causal_forecast import summarize_fit_quality
+
+# Out-of-sample: refit on train, predict holdout (no leakage)
+metrics, preds, actual = forecaster.evaluate(
+    holdout_steps=30,
+    return_predictions=True,
+)
+
+# In-sample: per-node model fit on training rows
+in_sample = forecaster.evaluate(in_sample=True)
+
+# Per-horizon error for one variable
+horizon_errors = forecaster.evaluate_horizon(variable="crop_yield", holdout_steps=30)
+```
+
+### Type-aware metrics
+
+| Variable type | Metrics |
+|---------------|---------|
+| continuous | MAE, MSE, RMSE, MAPE |
+| binary | accuracy, F1, Brier score |
+| multiclass | accuracy, macro-F1, log loss |
+| ordinal | accuracy, ordinal MAE |
+
+Summarize fit quality across mixed-type graphs:
+
+```python
+# Rank each variable using its type-appropriate metric
+summarize_fit_quality(metrics, use_type_aware_metric=True)
+
+# Or rank continuous variables only by RMSE
+summarize_fit_quality(metrics, metric="rmse")
+```
+
+### Walk-forward backtest
+
+```python
+backtest_results = forecaster.backtest(
+    horizon=10,
+    min_train_size=60,
+    step_size=15,
+    n_jobs=1,  # set > 1 for parallel folds
+)
+
+summary = forecaster.summarize_backtest(backtest_results)
+```
+
+Each fold:
+- Trains only on `data[:cutoff]` (strict past)
+- Predicts the next `horizon` steps
+- Does not modify the caller's fitted models
+
+## Visualization
+
+```python
+from causal_forecast import (
+    plot_time_series,
+    plot_forecast_comparison,
+    plot_seasonal_decomposition,
+    plot_counterfactual_timeseries,
+    plot_residuals,
+    plot_metrics_summary,
+)
+
+plot_time_series(data, "timestamp", ["temperature", "crop_yield"])
+plot_forecast_comparison(actual, predictions, "timestamp", "crop_yield")
+plot_counterfactual_timeseries(predictions, cf_ramp, "timestamp")
+plot_metrics_summary(metrics, metric="rmse")
+plot_residuals(actual, predictions, "timestamp", "crop_yield")
+```
+
+## API reference
+
+### `CausalForecaster`
+
+```python
+CausalForecaster(
+    data: pd.DataFrame,
+    graph: nx.DiGraph,
+    target: str,
+    time_column: str,
+    forecast_horizon: int = 1,
+    lookback_periods: int = 3,
+    variable_types: dict = None,      # skip auto-detection
+    type_overrides: dict = None,      # override specific nodes
+    use_one_hot_parents: bool = True, # one-hot encode multiclass/ordinal parent lags
+)
+```
+
+| Method | Description |
+|--------|-------------|
+| `fit(verbose=True)` | Train type-aware models for each node |
+| `predict(steps, counterfactuals, return_proba=False)` | Multi-step forecast |
+| `predict_in_sample()` | One-step-ahead predictions on training data |
+| `run_counterfactual(interventions, steps)` | What-if scenario forecasting |
+| `evaluate(holdout_steps, in_sample, return_predictions)` | Type-aware accuracy metrics |
+| `evaluate_horizon(variable, holdout_steps)` | Per-step error for one variable |
+| `backtest(horizon, min_train_size, step_size, n_jobs)` | Walk-forward backtest |
+| `summarize_backtest(backtest_df, metric)` | Aggregate backtest folds |
+
+### Standalone utilities
+
+```python
+from causal_forecast import (
+    detect_variable_types,
+    evaluate_forecast,
+    evaluate_forecast_typed,
+    evaluate_variable,
+    summarize_fit_quality,
+    summarize_backtest,
+    primary_metric_for_type,
+    mae, mse, rmse, mape,
+)
+```
+
+| Function | Description |
+|----------|-------------|
+| `detect_variable_types(data, graph, time_column, overrides)` | Auto-detect node types |
+| `evaluate_forecast_typed(actual, predicted, time_column, variables, variable_types)` | Metrics per variable type |
+| `summarize_fit_quality(metrics_df, metric, use_type_aware_metric)` | Rank good vs poor fits |
+| `summarize_backtest(backtest_df, metric, variable_types)` | Aggregate fold results |
+| `primary_metric_for_type(variable_type)` | Default metric name per type |
+
+## Project structure
+
+```
+CausalForecasting/
+├── causal_forecast/
+│   ├── core.py        # CausalForecaster
+│   ├── typing.py      # Variable type detection
+│   ├── utils.py       # Model training and encoding
+│   ├── metrics.py     # Evaluation and backtest summaries
+│   └── viz.py         # Plotting helpers
+├── analytics/
+│   └── example.ipynb  # End-to-end demo
+├── tests/
+└── README.md
+```
+
+## Testing
+
+```bash
+pip install pytest
+pytest tests/ -v
+```
+
+## Contributing
+
+Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/thom1178/CausalForecasting).
+
 ## License
+
 MIT License
