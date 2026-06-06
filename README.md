@@ -7,7 +7,7 @@ A Python package for **causal time-series forecasting**. Given a directed acycli
 ## What it does
 
 - Accepts a user-defined DAG and automatically detects variable types
-- Trains nonlinear RandomForest models per node (regression or classification)
+- Trains per-node models with **Random Forest** (default) or **GLM** backends
 - Forecasts multiple steps ahead using lag features and calendar time features
 - Runs counterfactual what-if scenarios (fixed or per-horizon interventions)
 - Evaluates fit quality with type-aware metrics
@@ -86,7 +86,7 @@ See [`analytics/example.ipynb`](analytics/example.ipynb) for a full walkthrough 
 
 1. **Type detection** — Each graph node is classified as `continuous`, `binary`, `multiclass`, or `ordinal`.
 2. **Feature engineering** — Calendar features (`year`, `month`, `day`, `dayofweek`) plus short-term lags. Optionally adds cyclical sin/cos encodings and seasonal lag features (`weekly`, `monthly`, `yearly`).
-3. **Per-node training** — Nodes are fit in topological order. Continuous nodes use `RandomForestRegressor`; categorical nodes use `RandomForestClassifier`.
+3. **Per-node training** — Nodes are fit in topological order using `model_type='random_forest'` (default) or `model_type='glm'`.
 4. **Multi-step prediction** — Each future step predicts all nodes in DAG order. Lag features use historical data for early steps, then prior predictions.
 5. **Counterfactuals** — Intervened nodes are overridden; downstream nodes still propagate through the graph.
 
@@ -109,6 +109,27 @@ forecaster = CausalForecaster(
 ```
 
 Or supply types explicitly with `variable_types={...}` to skip detection entirely.
+
+## Model backends
+
+Choose the per-node model with `model_type`:
+
+```python
+# Default: nonlinear Random Forest
+forecaster = CausalForecaster(data, G, "crop_yield", "timestamp", model_type="random_forest")
+
+# GLM: type-appropriate generalized linear models via statsmodels
+forecaster = CausalForecaster(data, G, "crop_yield", "timestamp", model_type="glm")
+```
+
+| Variable type | Random Forest | GLM |
+|---------------|---------------|-----|
+| continuous | `RandomForestRegressor` | Gaussian GLM |
+| binary | `RandomForestClassifier` | Binomial GLM (logit) |
+| multiclass | `RandomForestClassifier` | Multinomial logit |
+| ordinal | `RandomForestClassifier` | Ordered logit (falls back to multinomial) |
+
+GLM is useful when relationships are approximately linear on the link scale (e.g. logistic trends). Random Forest remains the default for complex nonlinear patterns.
 
 ## Seasonality (opt-in)
 
@@ -252,6 +273,7 @@ CausalForecaster(
     type_overrides: dict = None,      # override specific nodes
     use_one_hot_parents: bool = True, # one-hot encode multiclass/ordinal parent lags
     seasonality: list = None,        # opt-in: ['weekly', 'monthly', 'yearly']
+    model_type: str = "random_forest",  # or "glm"
 )
 ```
 
@@ -305,6 +327,7 @@ CausalForecasting/
 │   ├── utils.py       # Model training and encoding
 │   ├── metrics.py     # Evaluation and backtest summaries
 │   ├── seasonality.py # Seasonal features and period mapping
+│   ├── glm_models.py  # GLM training and prediction
 │   └── viz.py         # Plotting helpers
 ├── analytics/
 │   └── example.ipynb  # End-to-end demo

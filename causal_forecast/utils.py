@@ -5,21 +5,25 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from .typing import VariableType
+
+ModelType = Literal["random_forest", "glm"]
 
 
 @dataclass
 class FittedNodeModel:
     """Container for a per-node fitted model and its encoders."""
 
-    model: Union[RandomForestRegressor, RandomForestClassifier]
+    model: object
     variable_type: VariableType
     label_encoder: Optional[LabelEncoder] = None
     categories: Optional[List] = field(default=None)
     one_hot_encoder: Optional[OneHotEncoder] = None
     one_hot_feature_names: Optional[List[str]] = field(default=None)
+    model_backend: ModelType = "random_forest"
+    feature_names: Optional[List[str]] = field(default=None)
 
 
 def validate_graph_data(data: pd.DataFrame, graph: nx.DiGraph, target: str):
@@ -165,12 +169,25 @@ def train_node_model(
     y: pd.Series,
     variable_type: VariableType,
     label_encoder: Optional[LabelEncoder] = None,
+    model_type: ModelType = "random_forest",
 ) -> FittedNodeModel:
     """Train a type-appropriate model for a single node."""
+    if model_type == "glm":
+        from .glm_models import train_glm_node_model
+
+        return train_glm_node_model(X, y, variable_type, label_encoder=label_encoder)
+
+    feature_names = list(X.columns)
+
     if variable_type == "continuous":
         model = RandomForestRegressor(n_estimators=100, random_state=42)
         model.fit(X, y)
-        return FittedNodeModel(model=model, variable_type=variable_type)
+        return FittedNodeModel(
+            model=model,
+            variable_type=variable_type,
+            model_backend="random_forest",
+            feature_names=feature_names,
+        )
 
     if label_encoder is None:
         label_encoder = build_label_encoder(y, variable_type)
@@ -184,7 +201,26 @@ def train_node_model(
         variable_type=variable_type,
         label_encoder=label_encoder,
         categories=list(label_encoder.classes_),
+        model_backend="random_forest",
+        feature_names=feature_names,
     )
+
+
+def predict_node_batch(
+    fitted: FittedNodeModel,
+    X: pd.DataFrame,
+) -> np.ndarray:
+    """Predict multiple rows for a fitted node model."""
+    if fitted.model_backend == "glm":
+        from .glm_models import predict_glm_batch
+
+        return predict_glm_batch(fitted, X)
+
+    if fitted.variable_type == "continuous":
+        return fitted.model.predict(X)
+
+    encoded = fitted.model.predict(X)
+    return np.asarray(decode_values(encoded, fitted.label_encoder, fitted.variable_type))
 
 
 def predict_node_value(
@@ -193,6 +229,14 @@ def predict_node_value(
     return_proba: bool = False,
 ) -> Union[float, int, str, np.ndarray]:
     """Predict a single row for a node using the fitted type-aware model."""
+    feature_names = fitted.feature_names or list(fitted.model.feature_names_in_)
+    X = X[feature_names]
+
+    if fitted.model_backend == "glm":
+        from .glm_models import predict_glm_value
+
+        return predict_glm_value(fitted, X, return_proba=return_proba)
+
     if fitted.variable_type == "continuous":
         return float(fitted.model.predict(X)[0])
 

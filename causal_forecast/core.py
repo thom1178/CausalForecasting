@@ -7,12 +7,13 @@ from datetime import datetime
 from .typing import VariableType, detect_variable_types
 from .utils import (
     FittedNodeModel,
+    ModelType,
     infer_time_delta,
     train_node_model,
     validate_graph_data,
     build_label_encoder,
-    decode_values,
     expand_categorical_lag_features,
+    predict_node_batch,
     predict_node_value,
     value_for_lag_feature,
 )
@@ -50,6 +51,7 @@ class CausalForecaster:
         type_overrides: Optional[Dict[str, VariableType]] = None,
         use_one_hot_parents: bool = True,
         seasonality: Optional[List[str]] = None,
+        model_type: ModelType = "random_forest",
     ):
         """
         Initialize the CausalForecaster.
@@ -65,6 +67,7 @@ class CausalForecaster:
             type_overrides: Overrides applied on top of auto-detection
             use_one_hot_parents: One-hot encode multiclass/ordinal parent lags (Phase 2)
             seasonality: Opt-in seasonal patterns ('weekly', 'monthly', 'yearly')
+            model_type: Per-node model backend ('random_forest' or 'glm')
         """
         self.data = data.copy()
         self.graph = graph.copy()
@@ -74,6 +77,7 @@ class CausalForecaster:
         self.lookback_periods = lookback_periods
         self.use_one_hot_parents = use_one_hot_parents
         self.seasonality = seasonality or []
+        self.model_type = model_type
 
         validate_graph_data(self.data, self.graph, self.target)
         self.data = self.data.sort_values(time_column).reset_index(drop=True)
@@ -177,7 +181,10 @@ class CausalForecaster:
         """Train type-aware models for each node in the causal graph."""
         for node in self.node_order:
             if verbose:
-                print(f"Training model for node: {node} ({self.variable_types[node]})")
+                print(
+                    f"Training model for node: {node} "
+                    f"({self.variable_types[node]}, {self.model_type})"
+                )
 
             X, y = self._prepare_time_series_data(node)
             var_type = self.variable_types[node]
@@ -186,7 +193,13 @@ class CausalForecaster:
             if var_type != "continuous":
                 label_encoder = build_label_encoder(y, var_type)
 
-            self.models[node] = train_node_model(X, y, var_type, label_encoder=label_encoder)
+            self.models[node] = train_node_model(
+                X,
+                y,
+                var_type,
+                label_encoder=label_encoder,
+                model_type=self.model_type,
+            )
 
     def _future_dates(self, steps: int) -> List[datetime]:
         last_date = pd.to_datetime(self.data[self.time_column].max())
@@ -288,7 +301,9 @@ class CausalForecaster:
                         features[col] = self._lag_value(var, period, predictions, historical_data)
 
         X = pd.DataFrame([features])
-        return X[self.models[node].model.feature_names_in_]
+        fitted = self.models[node]
+        feature_names = fitted.feature_names or list(fitted.model.feature_names_in_)
+        return X[feature_names]
 
     def predict(
         self,
@@ -339,17 +354,7 @@ class CausalForecaster:
                 raise ValueError("Models not fitted. Call fit() before predict_in_sample().")
 
             X, _, node_dates = self._prepare_time_series_data(node, return_dates=True)
-            fitted = self.models[node]
-
-            if fitted.variable_type == "continuous":
-                preds = fitted.model.predict(X)
-            else:
-                encoded = fitted.model.predict(X)
-                preds = np.asarray(
-                    decode_values(encoded, fitted.label_encoder, fitted.variable_type)
-                )
-
-            predictions[node] = preds
+            predictions[node] = predict_node_batch(self.models[node], X)
 
             if dates is None:
                 dates = node_dates
@@ -513,6 +518,7 @@ class CausalForecaster:
             variable_types=self.variable_types,
             use_one_hot_parents=self.use_one_hot_parents,
             seasonality=self.seasonality,
+            model_type=self.model_type,
         )
 
     def run_counterfactual(
