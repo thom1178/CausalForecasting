@@ -4,6 +4,10 @@ A Python package for **causal time-series forecasting**. Given a directed acycli
 
 **Version:** 0.2.0
 
+## Documentation
+
+- [Mathematical foundations](docs/mathematics.md) — exact equations for features, models, forecasting, counterfactuals, and metrics
+
 ## What it does
 
 - Accepts a user-defined DAG and automatically detects variable types
