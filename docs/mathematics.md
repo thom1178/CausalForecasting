@@ -184,7 +184,7 @@ $$
 **Binary probability** (when `return_proba=True`):
 
 $$
-\hat{p} = \mathbb{P}(y = 1 \mid X) = \operatorname{predict\_proba}(X)[1]
+\hat{p} = \mathbb{P}(y = 1 \mid X) = \mathrm{predict\_proba}(X)[1]
 $$
 
 **Model summary:** mean decrease in impurity (Gini/MSE) per feature $j$, reported as `importance`.
