@@ -184,7 +184,7 @@ $$
 **Binary probability** (when `return_proba=True`):
 
 $$
-\hat{p} = \mathbb{P}(y = 1 \mid X) = \mathrm{predict\_proba}(X)[1]
+\hat{p} = \mathbb{P}(y = 1 \mid X)
 $$
 
 **Model summary:** mean decrease in impurity (Gini/MSE) per feature $j$, reported as `importance`.
@@ -273,10 +273,12 @@ The feature vector $X_{t_k}$ is built from calendar/cyclical features at $t_k$ a
 Let $\mathcal{P}$ be the list of prediction dictionaries from steps $1, \ldots, k-1$. For lag $\ell$, the value of variable $v$ used in features is:
 
 $$
-v_{t_k - \ell} =
+v_{t_k-\ell} =
 \begin{cases}
-\mathcal{P}[-\ell][v] & \text{if } |\mathcal{P}| \geq \ell \quad \text{(forecast history)} \\[4pt]
-\text{historical\_tail}[v]_{-(\ell - |\mathcal{P}|)} & \text{otherwise (observed tail)}
+P_{-\ell,v}
+& \text{if } |P| \ge \ell \; (\text{forecast history}) \\[6pt]
+H_{v,\,-(\ell-|P|)}
+& \text{otherwise (observed tail)}
 \end{cases}
 $$
 
